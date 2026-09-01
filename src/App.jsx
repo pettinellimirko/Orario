@@ -1,12 +1,45 @@
 import { useState, useEffect, Fragment } from "react";
-import { Plus, X, Trash2, AlertTriangle, Eye, LayoutGrid, Users, LogOut, Lock } from "lucide-react";
+import { Plus, X, Trash2, AlertTriangle, Eye, LayoutGrid, Users, LogOut, Lock, UserPlus } from "lucide-react";
 import { supabase, supabaseConfigured } from "./supabaseClient";
 
 const DAYS = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì"];
-const HOURS = Array.from({ length: 8 }, (_, i) => ({
-  index: i,
-  label: `${8 + i}:00–${9 + i}:00`,
-}));
+
+// Orari fissi della scuola. Il martedì ha uscita anticipata.
+// Ogni valore è un confine tra un periodo e il successivo.
+const BOUNDARIES = {
+  0: ["8:20", "9:20", "10:20", "11:20", "12:20", "13:20", "14:20", "15:20", "16:40"],
+  1: ["8:20", "9:20", "10:20", "11:20", "12:20", "13:40"],
+  2: ["8:20", "9:20", "10:20", "11:20", "12:20", "13:20", "14:20", "15:20", "16:40"],
+  3: ["8:20", "9:20", "10:20", "11:20", "12:20", "13:20", "14:20", "15:20", "16:40"],
+  4: ["8:20", "9:20", "10:20", "11:20", "12:20", "13:20", "14:20", "15:20", "16:40"],
+};
+
+const toMinutes = (hhmm) => {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+};
+
+const periodsForDay = (day) => {
+  const b = BOUNDARIES[day];
+  return b.slice(0, -1).map((start, i) => ({ index: i, start, end: b[i + 1] }));
+};
+
+const MAX_PERIODS = Math.max(...Object.values(BOUNDARIES).map((b) => b.length - 1));
+const REFERENCE_PERIODS = periodsForDay(0); // per le etichette orario in griglia (uguali per tutti i giorni tranne il martedì, che semplicemente si ferma prima)
+
+const periodDuration = (day, periodIndex) => {
+  const p = periodsForDay(day)[periodIndex];
+  if (!p) return 0;
+  return toMinutes(p.end) - toMinutes(p.start);
+};
+
+const formatDuration = (minutes) => {
+  if (minutes <= 0) return "0min";
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h > 0 ? `${h}h ${m}min` : `${m}min`;
+};
 
 const PALETTE = {
   bg: "#FAF7F1",
@@ -42,7 +75,7 @@ export default function App() {
 
   const [selectedClassId, setSelectedClassId] = useState(null);
   const [selectedTeacherId, setSelectedTeacherId] = useState(null);
-  const [modal, setModal] = useState(null); // { day, hour, mode: 'assign'|'remove', slotId? }
+  const [modal, setModal] = useState(null); // { day, periodIndex }
 
   const [newTeacherName, setNewTeacherName] = useState("");
   const [newTeacherHours, setNewTeacherHours] = useState("");
@@ -83,7 +116,17 @@ export default function App() {
         hours: a.hours,
       }))
     );
-    setSlots((slotsRes.data || []).map((s) => ({ id: s.id, day: s.day, hour: s.hour, assignmentId: s.assignment_id })));
+    setSlots(
+      (slotsRes.data || []).map((s) => ({
+        id: s.id,
+        day: s.day,
+        periodIndex: s.period_index,
+        assignmentId: s.assignment_id,
+        isCo: s.is_co,
+        coOffsetMinutes: s.co_offset_minutes,
+        coDurationMinutes: s.co_duration_minutes,
+      }))
+    );
     setDataLoading(false);
   };
 
@@ -106,8 +149,17 @@ export default function App() {
   const assignmentById = (id) => assignments.find((a) => a.id === id);
   const teacherOfAssignment = (assignmentId) => assignmentById(assignmentId)?.teacherId;
 
-  const usedHours = (assignmentId) => slots.filter((s) => s.assignmentId === assignmentId).length;
-  const remainingHours = (assignment) => assignment.hours - usedHours(assignment.id);
+  // minuti usati da un'assegnazione: periodi interi assegnati + eventuali frazioni in compresenza
+  const usedMinutes = (assignmentId) => {
+    const primary = slots
+      .filter((s) => !s.isCo && s.assignmentId === assignmentId)
+      .reduce((sum, s) => sum + periodDuration(s.day, s.periodIndex), 0);
+    const co = slots
+      .filter((s) => s.isCo && s.assignmentId === assignmentId)
+      .reduce((sum, s) => sum + (s.coDurationMinutes || 0), 0);
+    return primary + co;
+  };
+  const remainingMinutes = (assignment) => assignment.hours * 60 - usedMinutes(assignment.id);
 
   const teacherAssignedHours = (teacherId) =>
     assignments.filter((a) => a.teacherId === teacherId).reduce((sum, a) => sum + a.hours, 0);
@@ -116,19 +168,21 @@ export default function App() {
     return t ? t.totalHours - teacherAssignedHours(teacherId) : 0;
   };
 
-  const slotAt = (day, hour, classId) =>
+  const primarySlotAt = (day, periodIndex, classId) =>
     slots.find((s) => {
       const a = assignmentById(s.assignmentId);
-      return s.day === day && s.hour === hour && a && a.classId === classId;
+      return !s.isCo && s.day === day && s.periodIndex === periodIndex && a && a.classId === classId;
     });
 
-  const teacherBusyAt = (teacherId, day, hour, excludeSlotId) =>
+  const coSlotsAt = (day, periodIndex, classId) =>
+    slots.filter((s) => {
+      const a = assignmentById(s.assignmentId);
+      return s.isCo && s.day === day && s.periodIndex === periodIndex && a && a.classId === classId;
+    });
+
+  const teacherBusyAt = (teacherId, day, periodIndex) =>
     slots.some(
-      (s) =>
-        s.id !== excludeSlotId &&
-        s.day === day &&
-        s.hour === hour &&
-        teacherOfAssignment(s.assignmentId) === teacherId
+      (s) => !s.isCo && s.day === day && s.periodIndex === periodIndex && teacherOfAssignment(s.assignmentId) === teacherId
     );
 
   // ---- actions (write to Supabase, then refresh) ----
@@ -195,23 +249,30 @@ export default function App() {
     await fetchAll();
   };
 
-  const openCell = (day, hour) => {
-    const existing = slotAt(day, hour, selectedClassId);
-    if (existing) setModal({ mode: "remove", day, hour, slotId: existing.id });
-    else setModal({ mode: "assign", day, hour });
-  };
-  const assignTo = async (assignmentId) => {
+  const openCell = (day, periodIndex) => setModal({ day, periodIndex });
+
+  const assignPrimary = async (assignmentId) => {
     const { error } = await supabase
       .from("slots")
-      .insert({ day: modal.day, hour: modal.hour, assignment_id: assignmentId });
+      .insert({ day: modal.day, period_index: modal.periodIndex, assignment_id: assignmentId, is_co: false });
     if (error) return alert("Errore: " + error.message);
-    setModal(null);
     await fetchAll();
   };
-  const unassign = async () => {
-    const { error } = await supabase.from("slots").delete().eq("id", modal.slotId);
+  const removeSlot = async (slotId) => {
+    const { error } = await supabase.from("slots").delete().eq("id", slotId);
     if (error) return alert("Errore: " + error.message);
-    setModal(null);
+    await fetchAll();
+  };
+  const addCoPresenza = async (assignmentId, offsetMinutes, durationMinutes) => {
+    const { error } = await supabase.from("slots").insert({
+      day: modal.day,
+      period_index: modal.periodIndex,
+      assignment_id: assignmentId,
+      is_co: true,
+      co_offset_minutes: offsetMinutes,
+      co_duration_minutes: durationMinutes,
+    });
+    if (error) return alert("Errore: " + error.message);
     await fetchAll();
   };
 
@@ -233,7 +294,6 @@ export default function App() {
       `}</style>
 
       <div className="max-w-6xl mx-auto px-6 py-8">
-        {/* Header */}
         <div className="flex items-baseline justify-between mb-3 flex-wrap gap-3">
           <div>
             <h1 className="heading text-3xl" style={{ color: PALETTE.ink, fontWeight: 600 }}>
@@ -260,11 +320,7 @@ export default function App() {
           {session ? (
             <>
               <span>Accesso direzione: {session.user.email}</span>
-              <button
-                onClick={() => supabase.auth.signOut()}
-                className="flex items-center gap-1 underline"
-                style={{ color: PALETTE.inkMuted }}
-              >
+              <button onClick={() => supabase.auth.signOut()} className="flex items-center gap-1 underline" style={{ color: PALETTE.inkMuted }}>
                 <LogOut size={12} /> Esci
               </button>
             </>
@@ -280,36 +336,16 @@ export default function App() {
             {tab === "config" &&
               (session ? (
                 <ConfigTab
-                  teachers={teachers}
-                  subjects={subjects}
-                  classes={classes}
-                  assignments={assignments}
-                  newTeacherName={newTeacherName}
-                  setNewTeacherName={setNewTeacherName}
-                  newTeacherHours={newTeacherHours}
-                  setNewTeacherHours={setNewTeacherHours}
-                  addTeacher={addTeacher}
-                  removeTeacher={removeTeacher}
-                  updateTeacherHours={updateTeacherHours}
-                  teacherAssignedHours={teacherAssignedHours}
-                  teacherRemainingBudget={teacherRemainingBudget}
-                  newSubjectName={newSubjectName}
-                  setNewSubjectName={setNewSubjectName}
-                  addSubject={addSubject}
-                  removeSubject={removeSubject}
-                  newClassName={newClassName}
-                  setNewClassName={setNewClassName}
-                  addClass={addClass}
-                  removeClass={removeClass}
-                  newAssign={newAssign}
-                  setNewAssign={setNewAssign}
-                  addAssignment={addAssignment}
-                  removeAssignment={removeAssignment}
-                  teacherName={teacherName}
-                  subjectName={subjectName}
-                  className={className}
-                  remainingHours={remainingHours}
-                  usedHours={usedHours}
+                  teachers={teachers} subjects={subjects} classes={classes} assignments={assignments}
+                  newTeacherName={newTeacherName} setNewTeacherName={setNewTeacherName}
+                  newTeacherHours={newTeacherHours} setNewTeacherHours={setNewTeacherHours}
+                  addTeacher={addTeacher} removeTeacher={removeTeacher} updateTeacherHours={updateTeacherHours}
+                  teacherAssignedHours={teacherAssignedHours} teacherRemainingBudget={teacherRemainingBudget}
+                  newSubjectName={newSubjectName} setNewSubjectName={setNewSubjectName} addSubject={addSubject} removeSubject={removeSubject}
+                  newClassName={newClassName} setNewClassName={setNewClassName} addClass={addClass} removeClass={removeClass}
+                  newAssign={newAssign} setNewAssign={setNewAssign} addAssignment={addAssignment} removeAssignment={removeAssignment}
+                  teacherName={teacherName} subjectName={subjectName} className={className}
+                  remainingMinutes={remainingMinutes} usedMinutes={usedMinutes}
                 />
               ) : (
                 <LoginGate authLoading={authLoading} />
@@ -318,18 +354,10 @@ export default function App() {
             {tab === "orario" &&
               (session ? (
                 <OrarioTab
-                  classes={classes}
-                  selectedClassId={selectedClassId}
-                  setSelectedClassId={setSelectedClassId}
-                  classAssignments={classAssignments}
-                  teacherName={teacherName}
-                  subjectName={subjectName}
-                  remainingHours={remainingHours}
-                  usedHours={usedHours}
-                  slotAt={slotAt}
-                  openCell={openCell}
-                  classColor={classColor}
-                  assignmentById={assignmentById}
+                  classes={classes} selectedClassId={selectedClassId} setSelectedClassId={setSelectedClassId}
+                  classAssignments={classAssignments} teacherName={teacherName} subjectName={subjectName}
+                  remainingMinutes={remainingMinutes} primarySlotAt={primarySlotAt} coSlotsAt={coSlotsAt}
+                  openCell={openCell} classColor={classColor} assignmentById={assignmentById}
                 />
               ) : (
                 <LoginGate authLoading={authLoading} />
@@ -337,13 +365,8 @@ export default function App() {
 
             {tab === "insegnante" && (
               <InsegnanteTab
-                teachers={teachers}
-                selectedTeacherId={selectedTeacherId}
-                setSelectedTeacherId={setSelectedTeacherId}
-                teacherSlots={teacherSlots}
-                subjectName={subjectName}
-                className={className}
-                classColor={classColor}
+                teachers={teachers} selectedTeacherId={selectedTeacherId} setSelectedTeacherId={setSelectedTeacherId}
+                teacherSlots={teacherSlots} subjectName={subjectName} className={className} classColor={classColor}
               />
             )}
           </>
@@ -357,11 +380,13 @@ export default function App() {
           classAssignments={classAssignments}
           teacherName={teacherName}
           subjectName={subjectName}
-          remainingHours={remainingHours}
+          remainingMinutes={remainingMinutes}
           teacherBusyAt={teacherBusyAt}
-          assignTo={assignTo}
-          unassign={unassign}
-          slotAt={slotAt}
+          assignPrimary={assignPrimary}
+          removeSlot={removeSlot}
+          addCoPresenza={addCoPresenza}
+          primarySlotAt={primarySlotAt}
+          coSlotsAt={coSlotsAt}
           selectedClassId={selectedClassId}
           assignmentById={assignmentById}
         />
@@ -377,7 +402,6 @@ function SetupNeeded() {
         <h1 className="text-lg mb-2" style={{ fontWeight: 600 }}>Configurazione mancante</h1>
         <p className="text-sm" style={{ color: "#7A7266" }}>
           Mancano le variabili d'ambiente <code>VITE_SUPABASE_URL</code> e <code>VITE_SUPABASE_ANON_KEY</code>.
-          Aggiungile in un file <code>.env.local</code> in locale, oppure nelle "Environment Variables" del progetto su Vercel, poi ricarica.
         </p>
       </div>
     </div>
@@ -410,20 +434,8 @@ function LoginGate({ authLoading }) {
         Questa sezione è riservata a chi gestisce l'orario. Le insegnanti possono consultare il proprio orario da "Vista insegnante" senza accedere.
       </p>
       <div className="flex flex-col gap-2 mb-3">
-        <TextInput
-          type="email"
-          placeholder="Email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-        />
-        <TextInput
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-        />
+        <TextInput type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+        <TextInput type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
       </div>
       {error && <p className="text-xs mb-3" style={{ color: PALETTE.danger }}>{error}</p>}
       <SmallButton onClick={submit}>{loading ? "Accesso in corso…" : "Accedi"}</SmallButton>
@@ -433,15 +445,8 @@ function LoginGate({ authLoading }) {
 
 function TabButton({ active, onClick, children, icon }) {
   return (
-    <button
-      onClick={onClick}
-      className="flex items-center gap-1.5 px-4 py-2 rounded-full text-sm transition-colors"
-      style={{
-        background: active ? PALETTE.primary : "transparent",
-        color: active ? "#fff" : PALETTE.inkMuted,
-        fontWeight: 500,
-      }}
-    >
+    <button onClick={onClick} className="flex items-center gap-1.5 px-4 py-2 rounded-full text-sm transition-colors"
+      style={{ background: active ? PALETTE.primary : "transparent", color: active ? "#fff" : PALETTE.inkMuted, fontWeight: 500 }}>
       {icon}
       {children}
     </button>
@@ -449,42 +454,21 @@ function TabButton({ active, onClick, children, icon }) {
 }
 
 function Card({ children, style }) {
-  return (
-    <div
-      className="rounded-2xl p-5"
-      style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, ...style }}
-    >
-      {children}
-    </div>
-  );
+  return <div className="rounded-2xl p-5" style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, ...style }}>{children}</div>;
 }
 
 function SectionTitle({ children }) {
-  return (
-    <h2 className="heading text-lg mb-3" style={{ fontWeight: 600 }}>
-      {children}
-    </h2>
-  );
+  return <h2 className="heading text-lg mb-3" style={{ fontWeight: 600 }}>{children}</h2>;
 }
 
 function TextInput(props) {
-  return (
-    <input
-      {...props}
-      className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-      style={{ border: `1px solid ${PALETTE.border}`, background: "#fff" }}
-    />
-  );
+  return <input {...props} className="w-full rounded-lg px-3 py-2 text-sm outline-none" style={{ border: `1px solid ${PALETTE.border}`, background: "#fff" }} />;
 }
 
 function SmallButton({ onClick, children, tone = "primary" }) {
   const bg = tone === "primary" ? PALETTE.primary : tone === "danger" ? PALETTE.danger : PALETTE.honey;
   return (
-    <button
-      onClick={onClick}
-      className="flex items-center justify-center gap-1 rounded-lg px-3 py-2 text-sm text-white shrink-0"
-      style={{ background: bg, fontWeight: 500 }}
-    >
+    <button onClick={onClick} className="flex items-center justify-center gap-1 rounded-lg px-3 py-2 text-sm text-white shrink-0" style={{ background: bg, fontWeight: 500 }}>
       {children}
     </button>
   );
@@ -497,9 +481,7 @@ function ListRow({ label, sub, onRemove }) {
         <div className="text-sm" style={{ fontWeight: 500 }}>{label}</div>
         {sub && <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{sub}</div>}
       </div>
-      <button onClick={onRemove} style={{ color: PALETTE.inkMuted }} className="p-1 hover:opacity-70">
-        <Trash2 size={15} />
-      </button>
+      <button onClick={onRemove} style={{ color: PALETTE.inkMuted }} className="p-1 hover:opacity-70"><Trash2 size={15} /></button>
     </div>
   );
 }
@@ -512,7 +494,7 @@ function ConfigTab(props) {
     newSubjectName, setNewSubjectName, addSubject, removeSubject,
     newClassName, setNewClassName, addClass, removeClass,
     newAssign, setNewAssign, addAssignment, removeAssignment,
-    teacherName, subjectName, className, remainingHours, usedHours,
+    teacherName, subjectName, className, remainingMinutes, usedMinutes,
   } = props;
 
   return (
@@ -520,25 +502,12 @@ function ConfigTab(props) {
       <Card>
         <SectionTitle>Insegnanti</SectionTitle>
         <p className="text-xs mb-3" style={{ color: PALETTE.inkMuted }}>
-          Le ore totali sono il monte ore settimanale contrattuale: quante ore, in tutto, l'insegnante può insegnare tra tutte le materie e classi.
+          Le ore totali sono il monte ore settimanale contrattuale.
         </p>
         <div className="flex gap-2 mb-3">
-          <TextInput
-            placeholder="Nome e cognome"
-            value={newTeacherName}
-            onChange={(e) => setNewTeacherName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addTeacher()}
-          />
-          <input
-            type="number"
-            min="0"
-            placeholder="Ore tot."
-            value={newTeacherHours}
-            onChange={(e) => setNewTeacherHours(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addTeacher()}
-            className="w-24 rounded-lg px-3 py-2 text-sm outline-none"
-            style={{ border: `1px solid ${PALETTE.border}` }}
-          />
+          <TextInput placeholder="Nome e cognome" value={newTeacherName} onChange={(e) => setNewTeacherName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addTeacher()} />
+          <input type="number" min="0" placeholder="Ore tot." value={newTeacherHours} onChange={(e) => setNewTeacherHours(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addTeacher()}
+            className="w-24 rounded-lg px-3 py-2 text-sm outline-none" style={{ border: `1px solid ${PALETTE.border}` }} />
           <SmallButton onClick={addTeacher}><Plus size={15} /></SmallButton>
         </div>
         {teachers.map((t) => {
@@ -551,28 +520,15 @@ function ConfigTab(props) {
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-sm" style={{ fontWeight: 500 }}>{t.name}</span>
                 <div className="flex items-center gap-2 shrink-0">
-                  <input
-                    type="number"
-                    min="0"
-                    defaultValue={t.totalHours}
-                    key={`${t.id}-${t.totalHours}`}
-                    onBlur={(e) => {
-                      if (Number(e.target.value) !== t.totalHours) updateTeacherHours(t.id, e.target.value);
-                    }}
-                    className="w-16 rounded-md px-2 py-1 text-xs text-right outline-none"
-                    style={{ border: `1px solid ${PALETTE.border}` }}
-                  />
+                  <input type="number" min="0" defaultValue={t.totalHours} key={`${t.id}-${t.totalHours}`}
+                    onBlur={(e) => { if (Number(e.target.value) !== t.totalHours) updateTeacherHours(t.id, e.target.value); }}
+                    className="w-16 rounded-md px-2 py-1 text-xs text-right outline-none" style={{ border: `1px solid ${PALETTE.border}` }} />
                   <span className="text-xs" style={{ color: PALETTE.inkMuted }}>h tot.</span>
-                  <button onClick={() => removeTeacher(t.id)} style={{ color: PALETTE.inkMuted }}>
-                    <Trash2 size={15} />
-                  </button>
+                  <button onClick={() => removeTeacher(t.id)} style={{ color: PALETTE.inkMuted }}><Trash2 size={15} /></button>
                 </div>
               </div>
               <div className="h-1.5 rounded-full w-full mb-1" style={{ background: PALETTE.border }}>
-                <div
-                  className="h-1.5 rounded-full"
-                  style={{ width: `${pct}%`, background: over ? PALETTE.danger : PALETTE.primary }}
-                />
+                <div className="h-1.5 rounded-full" style={{ width: `${pct}%`, background: over ? PALETTE.danger : PALETTE.primary }} />
               </div>
               <div className="text-xs" style={{ color: over ? PALETTE.danger : PALETTE.inkMuted, fontWeight: over ? 600 : 400 }}>
                 {assigned}h assegnate di {t.totalHours}h {over ? `· ${Math.abs(remaining)}h oltre il monte ore` : `· ${remaining}h libere`}
@@ -585,28 +541,16 @@ function ConfigTab(props) {
       <Card>
         <SectionTitle>Materie / attività</SectionTitle>
         <div className="flex gap-2 mb-3">
-          <TextInput
-            placeholder="Es. Musica"
-            value={newSubjectName}
-            onChange={(e) => setNewSubjectName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addSubject()}
-          />
+          <TextInput placeholder="Es. Musica" value={newSubjectName} onChange={(e) => setNewSubjectName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addSubject()} />
           <SmallButton onClick={addSubject}><Plus size={15} /></SmallButton>
         </div>
-        {subjects.map((s) => (
-          <ListRow key={s.id} label={s.name} onRemove={() => removeSubject(s.id)} />
-        ))}
+        {subjects.map((s) => <ListRow key={s.id} label={s.name} onRemove={() => removeSubject(s.id)} />)}
       </Card>
 
       <Card>
         <SectionTitle>Classi / sezioni</SectionTitle>
         <div className="flex gap-2 mb-3">
-          <TextInput
-            placeholder="Es. Sezione Rossa"
-            value={newClassName}
-            onChange={(e) => setNewClassName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addClass()}
-          />
+          <TextInput placeholder="Es. Sezione Rossa" value={newClassName} onChange={(e) => setNewClassName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addClass()} />
           <SmallButton onClick={addClass}><Plus size={15} /></SmallButton>
         </div>
         {classes.map((c) => (
@@ -615,9 +559,7 @@ function ConfigTab(props) {
               <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: c.color }} />
               <span className="text-sm" style={{ fontWeight: 500 }}>{c.name}</span>
             </div>
-            <button onClick={() => removeClass(c.id)} style={{ color: PALETTE.inkMuted }}>
-              <Trash2 size={15} />
-            </button>
+            <button onClick={() => removeClass(c.id)} style={{ color: PALETTE.inkMuted }}><Trash2 size={15} /></button>
           </div>
         ))}
       </Card>
@@ -625,47 +567,23 @@ function ConfigTab(props) {
       <Card style={{ gridColumn: "1 / -1" }}>
         <SectionTitle>Assegnazioni — chi insegna cosa, a chi, per quante ore</SectionTitle>
         <p className="text-sm mb-4" style={{ color: PALETTE.inkMuted }}>
-          Ogni riga qui sotto definisce quante ore settimanali un'insegnante deve svolgere per una materia in una
-          sezione. Nella scheda "Costruisci orario" queste ore vengono poi posizionate nella griglia giorno/ora.
+          Ogni riga definisce quante ore settimanali un'insegnante deve svolgere per una materia in una sezione.
         </p>
         <div className="grid grid-cols-1 md:grid-cols-5 gap-2 mb-4">
-          <select
-            value={newAssign.teacherId}
-            onChange={(e) => setNewAssign({ ...newAssign, teacherId: e.target.value })}
-            className="rounded-lg px-3 py-2 text-sm"
-            style={{ border: `1px solid ${PALETTE.border}` }}
-          >
+          <select value={newAssign.teacherId} onChange={(e) => setNewAssign({ ...newAssign, teacherId: e.target.value })} className="rounded-lg px-3 py-2 text-sm" style={{ border: `1px solid ${PALETTE.border}` }}>
             <option value="">Insegnante…</option>
             {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
-          <select
-            value={newAssign.subjectId}
-            onChange={(e) => setNewAssign({ ...newAssign, subjectId: e.target.value })}
-            className="rounded-lg px-3 py-2 text-sm"
-            style={{ border: `1px solid ${PALETTE.border}` }}
-          >
+          <select value={newAssign.subjectId} onChange={(e) => setNewAssign({ ...newAssign, subjectId: e.target.value })} className="rounded-lg px-3 py-2 text-sm" style={{ border: `1px solid ${PALETTE.border}` }}>
             <option value="">Materia…</option>
             {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <select
-            value={newAssign.classId}
-            onChange={(e) => setNewAssign({ ...newAssign, classId: e.target.value })}
-            className="rounded-lg px-3 py-2 text-sm"
-            style={{ border: `1px solid ${PALETTE.border}` }}
-          >
+          <select value={newAssign.classId} onChange={(e) => setNewAssign({ ...newAssign, classId: e.target.value })} className="rounded-lg px-3 py-2 text-sm" style={{ border: `1px solid ${PALETTE.border}` }}>
             <option value="">Sezione…</option>
             {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
-          <TextInput
-            type="number"
-            min="1"
-            placeholder="Ore/sett."
-            value={newAssign.hours}
-            onChange={(e) => setNewAssign({ ...newAssign, hours: e.target.value })}
-          />
-          <SmallButton onClick={addAssignment}>
-            <Plus size={15} /> Aggiungi
-          </SmallButton>
+          <TextInput type="number" min="1" placeholder="Ore/sett." value={newAssign.hours} onChange={(e) => setNewAssign({ ...newAssign, hours: e.target.value })} />
+          <SmallButton onClick={addAssignment}><Plus size={15} /> Aggiungi</SmallButton>
         </div>
 
         {newAssign.teacherId && (() => {
@@ -673,10 +591,7 @@ function ConfigTab(props) {
           const requested = Number(newAssign.hours) || 0;
           const wouldExceed = requested > 0 && requested > remaining;
           return (
-            <p
-              className="text-xs mb-4 -mt-2"
-              style={{ color: wouldExceed ? PALETTE.danger : PALETTE.inkMuted, fontWeight: wouldExceed ? 600 : 400 }}
-            >
+            <p className="text-xs mb-4 -mt-2" style={{ color: wouldExceed ? PALETTE.danger : PALETTE.inkMuted, fontWeight: wouldExceed ? 600 : 400 }}>
               {teacherName(newAssign.teacherId)} ha {remaining}h libere sul monte ore
               {wouldExceed ? ` — questa assegnazione la porterebbe ${requested - remaining}h oltre il monte ore.` : "."}
             </p>
@@ -685,29 +600,25 @@ function ConfigTab(props) {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
           {assignments.map((a) => {
-            const rem = remainingHours(a);
-            const used = usedHours(a);
-            const pct = Math.min(100, Math.round((used / a.hours) * 100));
+            const remMin = remainingMinutes(a);
+            const usedMin = usedMinutes(a);
+            const pct = Math.min(100, Math.round((usedMin / (a.hours * 60)) * 100));
             return (
               <div key={a.id} className="flex items-center justify-between py-2.5" style={{ borderBottom: `1px solid ${PALETTE.border}` }}>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm truncate" style={{ fontWeight: 500 }}>
-                    {teacherName(a.teacherId)} · {subjectName(a.subjectId)}
-                  </div>
+                  <div className="text-sm truncate" style={{ fontWeight: 500 }}>{teacherName(a.teacherId)} · {subjectName(a.subjectId)}</div>
                   <div className="text-xs mb-1" style={{ color: PALETTE.inkMuted }}>{className(a.classId)}</div>
                   <div className="h-1.5 rounded-full w-full" style={{ background: PALETTE.border }}>
-                    <div className="h-1.5 rounded-full" style={{ width: `${pct}%`, background: rem === 0 ? PALETTE.primary : PALETTE.honey }} />
+                    <div className="h-1.5 rounded-full" style={{ width: `${pct}%`, background: remMin <= 0 ? PALETTE.primary : PALETTE.honey }} />
                   </div>
                 </div>
                 <div className="text-right ml-3 shrink-0">
-                  <div className="text-xs" style={{ color: rem === 0 ? PALETTE.primary : PALETTE.honey, fontWeight: 600 }}>
-                    {rem === 0 ? "Completo" : `${rem}h residue`}
+                  <div className="text-xs" style={{ color: remMin <= 0 ? PALETTE.primary : PALETTE.honey, fontWeight: 600 }}>
+                    {remMin <= 0 ? "Completo" : `${formatDuration(remMin)} residue`}
                   </div>
-                  <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{used}/{a.hours}h</div>
+                  <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{formatDuration(usedMin)}/{a.hours}h</div>
                 </div>
-                <button onClick={() => removeAssignment(a.id)} className="ml-3" style={{ color: PALETTE.inkMuted }}>
-                  <Trash2 size={15} />
-                </button>
+                <button onClick={() => removeAssignment(a.id)} className="ml-3" style={{ color: PALETTE.inkMuted }}><Trash2 size={15} /></button>
               </div>
             );
           })}
@@ -717,38 +628,28 @@ function ConfigTab(props) {
   );
 }
 
-function OrarioTab({ classes, selectedClassId, setSelectedClassId, classAssignments, teacherName, subjectName, remainingHours, usedHours, slotAt, openCell, classColor, assignmentById }) {
+function OrarioTab({ classes, selectedClassId, setSelectedClassId, classAssignments, teacherName, subjectName, remainingMinutes, primarySlotAt, coSlotsAt, openCell, classColor, assignmentById }) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
       <div className="lg:col-span-3">
         <div className="flex gap-2 mb-4 flex-wrap">
           {classes.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => setSelectedClassId(c.id)}
-              className="px-4 py-2 rounded-full text-sm flex items-center gap-2"
-              style={{
-                background: selectedClassId === c.id ? c.color : PALETTE.surface,
-                color: selectedClassId === c.id ? "#fff" : PALETTE.ink,
-                border: `1px solid ${selectedClassId === c.id ? c.color : PALETTE.border}`,
-                fontWeight: 500,
-              }}
-            >
+            <button key={c.id} onClick={() => setSelectedClassId(c.id)} className="px-4 py-2 rounded-full text-sm flex items-center gap-2"
+              style={{ background: selectedClassId === c.id ? c.color : PALETTE.surface, color: selectedClassId === c.id ? "#fff" : PALETTE.ink, border: `1px solid ${selectedClassId === c.id ? c.color : PALETTE.border}`, fontWeight: 500 }}>
               {c.name}
             </button>
           ))}
         </div>
 
         <Card style={{ overflowX: "auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "90px repeat(5, minmax(120px, 1fr))", minWidth: 700 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "110px repeat(5, minmax(120px, 1fr))", minWidth: 760 }}>
             <div />
             {DAYS.map((d) => (
-              <div key={d} className="text-sm text-center py-2" style={{ fontWeight: 600, color: PALETTE.inkMuted }}>
-                {d}
-              </div>
+              <div key={d} className="text-sm text-center py-2" style={{ fontWeight: 600, color: PALETTE.inkMuted }}>{d}</div>
             ))}
-            {HOURS.map((h) => (
-              <RowCells key={h.index} hour={h} selectedClassId={selectedClassId} slotAt={slotAt} openCell={openCell} teacherName={teacherName} subjectName={subjectName} assignmentById={assignmentById} />
+            {Array.from({ length: MAX_PERIODS }, (_, r) => r).map((r) => (
+              <PeriodRow key={r} rowIndex={r} selectedClassId={selectedClassId} primarySlotAt={primarySlotAt} coSlotsAt={coSlotsAt}
+                openCell={openCell} teacherName={teacherName} subjectName={subjectName} assignmentById={assignmentById} />
             ))}
           </div>
         </Card>
@@ -758,27 +659,19 @@ function OrarioTab({ classes, selectedClassId, setSelectedClassId, classAssignme
         <Card>
           <SectionTitle>Ore residue in questa sezione</SectionTitle>
           {classAssignments.length === 0 && (
-            <p className="text-sm" style={{ color: PALETTE.inkMuted }}>
-              Nessuna assegnazione per questa sezione. Aggiungine una nella scheda "Anagrafica".
-            </p>
+            <p className="text-sm" style={{ color: PALETTE.inkMuted }}>Nessuna assegnazione per questa sezione. Aggiungine una nella scheda "Anagrafica".</p>
           )}
           {classAssignments.map((a) => {
-            const rem = remainingHours(a);
+            const remMin = remainingMinutes(a);
             return (
               <div key={a.id} className="flex items-center justify-between py-2" style={{ borderBottom: `1px solid ${PALETTE.border}` }}>
                 <div className="text-sm min-w-0">
                   <div style={{ fontWeight: 500 }} className="truncate">{teacherName(a.teacherId)}</div>
                   <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{subjectName(a.subjectId)}</div>
                 </div>
-                <span
-                  className="text-xs px-2 py-1 rounded-full shrink-0 ml-2"
-                  style={{
-                    background: rem === 0 ? PALETTE.primarySoft : PALETTE.honeySoft,
-                    color: rem === 0 ? PALETTE.primary : PALETTE.honey,
-                    fontWeight: 600,
-                  }}
-                >
-                  {rem === 0 ? "Completo" : `${rem}h`}
+                <span className="text-xs px-2 py-1 rounded-full shrink-0 ml-2"
+                  style={{ background: remMin <= 0 ? PALETTE.primarySoft : PALETTE.honeySoft, color: remMin <= 0 ? PALETTE.primary : PALETTE.honey, fontWeight: 600 }}>
+                  {remMin <= 0 ? "Completo" : formatDuration(remMin)}
                 </span>
               </div>
             );
@@ -789,33 +682,37 @@ function OrarioTab({ classes, selectedClassId, setSelectedClassId, classAssignme
   );
 }
 
-function RowCells({ hour, selectedClassId, slotAt, openCell, teacherName, subjectName, assignmentById }) {
+function PeriodRow({ rowIndex, selectedClassId, primarySlotAt, coSlotsAt, openCell, teacherName, subjectName, assignmentById }) {
+  const refPeriod = REFERENCE_PERIODS[rowIndex];
   return (
     <>
-      <div className="text-xs py-3 pr-2 text-right" style={{ color: PALETTE.inkMuted }}>{hour.label}</div>
+      <div className="text-xs py-3 pr-2 text-right" style={{ color: PALETTE.inkMuted }}>
+        {refPeriod ? `${refPeriod.start}–${refPeriod.end}` : ""}
+      </div>
       {DAYS.map((_, dayIdx) => {
-        const slot = slotAt(dayIdx, hour.index, selectedClassId);
+        const periods = periodsForDay(dayIdx);
+        const period = periods[rowIndex];
+        if (!period) {
+          return <div key={dayIdx} className="m-1 rounded-lg" style={{ minHeight: 56, background: "transparent" }} />;
+        }
+        const slot = primarySlotAt(dayIdx, rowIndex, selectedClassId);
         const a = slot ? assignmentById(slot.assignmentId) : null;
+        const coSlots = coSlotsAt(dayIdx, rowIndex, selectedClassId);
         return (
-          <button
-            key={dayIdx}
-            onClick={() => openCell(dayIdx, hour.index)}
-            className="m-1 rounded-lg text-left px-2 py-2 transition-colors"
-            style={{
-              minHeight: 52,
-              background: slot ? PALETTE.primarySoft : "#FCFAF6",
-              border: `1px solid ${slot ? PALETTE.primary : PALETTE.border}`,
-              borderStyle: slot ? "solid" : "dashed",
-            }}
-          >
+          <button key={dayIdx} onClick={() => openCell(dayIdx, rowIndex)} className="m-1 rounded-lg text-left px-2 py-2 transition-colors"
+            style={{ minHeight: 56, background: slot ? PALETTE.primarySoft : "#FCFAF6", border: `1px solid ${slot ? PALETTE.primary : PALETTE.border}`, borderStyle: slot ? "solid" : "dashed" }}>
             {a ? (
               <>
-                <div className="text-xs" style={{ fontWeight: 600, color: PALETTE.primary }}>
-                  {teacherName(a.teacherId)}
-                </div>
-                <div className="text-xs" style={{ color: PALETTE.inkMuted }}>
-                  {subjectName(a.subjectId)}
-                </div>
+                <div className="text-xs" style={{ fontWeight: 600, color: PALETTE.primary }}>{teacherName(a.teacherId)}</div>
+                <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{subjectName(a.subjectId)}</div>
+                {coSlots.map((cs) => {
+                  const ca = assignmentById(cs.assignmentId);
+                  return (
+                    <div key={cs.id} className="text-xs mt-1" style={{ color: PALETTE.honey, fontWeight: 600 }}>
+                      + {teacherName(ca?.teacherId)} ({cs.coDurationMinutes}min)
+                    </div>
+                  );
+                })}
               </>
             ) : (
               <span className="text-xs" style={{ color: PALETTE.inkMuted }}>+ assegna</span>
@@ -827,71 +724,100 @@ function RowCells({ hour, selectedClassId, slotAt, openCell, teacherName, subjec
   );
 }
 
-function CellModal({ modal, onClose, classAssignments, teacherName, subjectName, remainingHours, teacherBusyAt, assignTo, unassign, slotAt, selectedClassId, assignmentById }) {
-  const label = `${DAYS[modal.day]} · ${HOURS[modal.hour].label}`;
+function CellModal({ modal, onClose, classAssignments, teacherName, subjectName, remainingMinutes, teacherBusyAt, assignPrimary, removeSlot, addCoPresenza, primarySlotAt, coSlotsAt, selectedClassId, assignmentById }) {
+  const period = periodsForDay(modal.day)[modal.periodIndex];
+  const label = `${DAYS[modal.day]} · ${period.start}–${period.end}`;
+  const duration = toMinutes(period.end) - toMinutes(period.start);
 
-  if (modal.mode === "remove") {
-    const slot = slotAt(modal.day, modal.hour, selectedClassId);
-    const a = slot ? assignmentById(slot.assignmentId) : null;
+  const primarySlot = primarySlotAt(modal.day, modal.periodIndex, selectedClassId);
+  const primaryAssignment = primarySlot ? assignmentById(primarySlot.assignmentId) : null;
+  const coSlots = coSlotsAt(modal.day, modal.periodIndex, selectedClassId);
+
+  const [coTeacherId, setCoTeacherId] = useState("");
+  const [coOffset, setCoOffset] = useState("0");
+  const [coDuration, setCoDuration] = useState("20");
+
+  if (!primarySlot) {
+    const options = classAssignments;
     return (
       <ModalShell onClose={onClose} title={label}>
-        {a && (
-          <div className="mb-4">
-            <div className="text-sm" style={{ fontWeight: 600 }}>{teacherName(a.teacherId)}</div>
-            <div className="text-sm" style={{ color: PALETTE.inkMuted }}>{subjectName(a.subjectId)}</div>
-          </div>
+        <p className="text-sm mb-3" style={{ color: PALETTE.inkMuted }}>Scegli chi assegnare a questo periodo ({duration} minuti).</p>
+        {options.length === 0 && (
+          <p className="text-sm" style={{ color: PALETTE.inkMuted }}>Nessuna assegnazione per questa sezione. Vai su "Anagrafica" → "Assegnazioni".</p>
         )}
-        <SmallButton tone="danger" onClick={unassign}>
-          <X size={15} /> Rimuovi da questo orario
-        </SmallButton>
+        <div className="space-y-2">
+          {options.map((a) => {
+            const busy = teacherBusyAt(a.teacherId, modal.day, modal.periodIndex);
+            const remMin = remainingMinutes(a);
+            const disabled = busy || remMin <= 0;
+            return (
+              <button key={a.id} disabled={disabled} onClick={() => assignPrimary(a.id)} className="w-full flex items-center justify-between rounded-lg px-3 py-2.5 text-left"
+                style={{ border: `1px solid ${busy ? PALETTE.dangerSoft : PALETTE.border}`, background: busy ? PALETTE.dangerSoft : remMin <= 0 ? "#F5F3EE" : "#fff", opacity: disabled ? 0.6 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
+                <div>
+                  <div className="text-sm" style={{ fontWeight: 500 }}>{teacherName(a.teacherId)}</div>
+                  <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{subjectName(a.subjectId)} · {remMin > 0 ? `${formatDuration(remMin)} residue` : "completo"}</div>
+                </div>
+                {busy && <span className="flex items-center gap-1 text-xs shrink-0 ml-2" style={{ color: PALETTE.danger }}><AlertTriangle size={13} /> occupata</span>}
+              </button>
+            );
+          })}
+        </div>
       </ModalShell>
     );
   }
 
-  const options = classAssignments;
+  const coOptions = classAssignments.filter((a) => a.id !== primaryAssignment.id);
+  const submitCo = () => {
+    const off = Number(coOffset);
+    const dur = Number(coDuration);
+    if (!coTeacherId || dur <= 0 || off < 0 || off + dur > duration) return;
+    addCoPresenza(coTeacherId, off, dur);
+    setCoTeacherId("");
+  };
 
   return (
     <ModalShell onClose={onClose} title={label}>
-      <p className="text-sm mb-3" style={{ color: PALETTE.inkMuted }}>
-        Scegli chi assegnare a questo orario.
-      </p>
-      {options.length === 0 && (
-        <p className="text-sm" style={{ color: PALETTE.inkMuted }}>
-          Per questa sezione non è ancora stata creata nessuna assegnazione. Vai su "Anagrafica" → "Assegnazioni" e aggiungine una prima di tornare qui.
-        </p>
-      )}
-      <div className="space-y-2">
-        {options.map((a) => {
-          const busy = teacherBusyAt(a.teacherId, modal.day, modal.hour);
-          const rem = remainingHours(a);
-          const disabled = busy || rem <= 0;
-          return (
-            <button
-              key={a.id}
-              disabled={disabled}
-              onClick={() => assignTo(a.id)}
-              className="w-full flex items-center justify-between rounded-lg px-3 py-2.5 text-left"
-              style={{
-                border: `1px solid ${busy ? PALETTE.dangerSoft : PALETTE.border}`,
-                background: busy ? PALETTE.dangerSoft : rem <= 0 ? "#F5F3EE" : "#fff",
-                opacity: disabled ? 0.6 : 1,
-                cursor: disabled ? "not-allowed" : "pointer",
-              }}
-            >
-              <div>
-                <div className="text-sm" style={{ fontWeight: 500 }}>{teacherName(a.teacherId)}</div>
-                <div className="text-xs" style={{ color: PALETTE.inkMuted }}>
-                  {subjectName(a.subjectId)} · {rem > 0 ? `${rem}h residue` : "completo"}
-                </div>
+      <div className="mb-4">
+        <div className="text-sm" style={{ fontWeight: 600 }}>{teacherName(primaryAssignment.teacherId)}</div>
+        <div className="text-sm mb-2" style={{ color: PALETTE.inkMuted }}>{subjectName(primaryAssignment.subjectId)}</div>
+        <SmallButton tone="danger" onClick={() => removeSlot(primarySlot.id)}><X size={15} /> Rimuovi da questo orario</SmallButton>
+      </div>
+
+      {coSlots.length > 0 && (
+        <div className="mb-4">
+          <div className="text-xs mb-2" style={{ color: PALETTE.inkMuted, fontWeight: 600 }}>Compresenza in questo periodo</div>
+          {coSlots.map((cs) => {
+            const ca = assignmentById(cs.assignmentId);
+            return (
+              <div key={cs.id} className="flex items-center justify-between py-1.5">
+                <span className="text-xs">{teacherName(ca?.teacherId)} · {cs.coOffsetMinutes}–{cs.coOffsetMinutes + cs.coDurationMinutes}min</span>
+                <button onClick={() => removeSlot(cs.id)} style={{ color: PALETTE.inkMuted }}><Trash2 size={14} /></button>
               </div>
-              {busy && (
-                <span className="flex items-center gap-1 text-xs shrink-0 ml-2" style={{ color: PALETTE.danger }}>
-                  <AlertTriangle size={13} /> occupata
-                </span>
-              )}
-            </button>
-          );
-        })}
+            );
+          })}
+        </div>
+      )}
+
+      <div className="pt-3" style={{ borderTop: `1px solid ${PALETTE.border}` }}>
+        <div className="flex items-center gap-2 mb-2">
+          <UserPlus size={14} style={{ color: PALETTE.inkMuted }} />
+          <span className="text-xs" style={{ color: PALETTE.inkMuted, fontWeight: 600 }}>Aggiungi compresenza (periodo di {duration} minuti)</span>
+        </div>
+        <select value={coTeacherId} onChange={(e) => setCoTeacherId(e.target.value)} className="w-full rounded-lg px-3 py-2 text-sm mb-2" style={{ border: `1px solid ${PALETTE.border}` }}>
+          <option value="">Seconda insegnante…</option>
+          {coOptions.map((a) => <option key={a.id} value={a.id}>{teacherName(a.teacherId)} · {subjectName(a.subjectId)}</option>)}
+        </select>
+        <div className="flex gap-2 mb-2">
+          <div className="flex-1">
+            <label className="text-xs" style={{ color: PALETTE.inkMuted }}>Minuto iniziale</label>
+            <input type="number" min="0" max={duration} value={coOffset} onChange={(e) => setCoOffset(e.target.value)} className="w-full rounded-lg px-3 py-2 text-sm" style={{ border: `1px solid ${PALETTE.border}` }} />
+          </div>
+          <div className="flex-1">
+            <label className="text-xs" style={{ color: PALETTE.inkMuted }}>Durata (min)</label>
+            <input type="number" min="1" max={duration} value={coDuration} onChange={(e) => setCoDuration(e.target.value)} className="w-full rounded-lg px-3 py-2 text-sm" style={{ border: `1px solid ${PALETTE.border}` }} />
+          </div>
+        </div>
+        <SmallButton tone="honey" onClick={submitCo}><Plus size={15} /> Aggiungi</SmallButton>
       </div>
     </ModalShell>
   );
@@ -899,16 +825,8 @@ function CellModal({ modal, onClose, classAssignments, teacherName, subjectName,
 
 function ModalShell({ onClose, title, children }) {
   return (
-    <div
-      className="fixed inset-0 flex items-center justify-center p-4 z-50"
-      style={{ background: "rgba(42,38,32,0.35)" }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="rounded-2xl p-5 w-full max-w-sm"
-        style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}` }}
-      >
+    <div className="fixed inset-0 flex items-center justify-center p-4 z-50" style={{ background: "rgba(42,38,32,0.35)" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="rounded-2xl p-5 w-full max-w-sm" style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, maxHeight: "90vh", overflowY: "auto" }}>
         <div className="flex items-center justify-between mb-3">
           <h3 className="heading text-lg" style={{ fontWeight: 600 }}>{title}</h3>
           <button onClick={onClose} style={{ color: PALETTE.inkMuted }}><X size={18} /></button>
@@ -921,76 +839,64 @@ function ModalShell({ onClose, title, children }) {
 
 function InsegnanteTab({ teachers, selectedTeacherId, setSelectedTeacherId, teacherSlots, subjectName, className, classColor }) {
   if (teachers.length === 0) {
-    return (
-      <Card>
-        <p className="text-sm" style={{ color: PALETTE.inkMuted }}>
-          Nessuna insegnante ancora registrata. La direzione può aggiungerle da "Anagrafica".
-        </p>
-      </Card>
-    );
+    return <Card><p className="text-sm" style={{ color: PALETTE.inkMuted }}>Nessuna insegnante ancora registrata.</p></Card>;
   }
 
   const slots = teacherSlots(selectedTeacherId);
-  const findSlot = (day, hour) => slots.find((s) => s.day === day && s.hour === hour);
+  const findPrimary = (day, periodIndex) => slots.find((s) => !s.isCo && s.day === day && s.periodIndex === periodIndex);
+  const findCo = (day, periodIndex) => slots.filter((s) => s.isCo && s.day === day && s.periodIndex === periodIndex);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
       <div className="lg:col-span-1">
         <Card>
           <SectionTitle>Insegnante</SectionTitle>
-          <select
-            value={selectedTeacherId || ""}
-            onChange={(e) => setSelectedTeacherId(e.target.value)}
-            className="w-full rounded-lg px-3 py-2 text-sm"
-            style={{ border: `1px solid ${PALETTE.border}` }}
-          >
+          <select value={selectedTeacherId || ""} onChange={(e) => setSelectedTeacherId(e.target.value)} className="w-full rounded-lg px-3 py-2 text-sm" style={{ border: `1px solid ${PALETTE.border}` }}>
             {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
-          <p className="text-xs mt-3" style={{ color: PALETTE.inkMuted }}>
-            Vista di sola consultazione — l'orario visualizzato qui non può essere modificato.
-          </p>
+          <p className="text-xs mt-3" style={{ color: PALETTE.inkMuted }}>Vista di sola consultazione.</p>
         </Card>
       </div>
 
       <div className="lg:col-span-3">
         <Card style={{ overflowX: "auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "90px repeat(5, minmax(130px, 1fr))", minWidth: 700 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "110px repeat(5, minmax(130px, 1fr))", minWidth: 760 }}>
             <div />
-            {DAYS.map((d) => (
-              <div key={d} className="text-sm text-center py-2" style={{ fontWeight: 600, color: PALETTE.inkMuted }}>
-                {d}
-              </div>
-            ))}
-            {HOURS.map((h) => (
-              <Fragment key={h.index}>
-                <div className="text-xs py-3 pr-2 text-right" style={{ color: PALETTE.inkMuted }}>{h.label}</div>
-                {DAYS.map((_, dayIdx) => {
-                  const s = findSlot(dayIdx, h.index);
-                  const color = s ? classColor(s.assignment.classId) : null;
-                  return (
-                    <div
-                      key={dayIdx}
-                      className="m-1 rounded-lg px-2 py-2"
-                      style={{
-                        minHeight: 52,
-                        background: s ? `${color}1A` : "#FCFAF6",
-                        border: `1px solid ${s ? color : PALETTE.border}`,
-                        borderStyle: s ? "solid" : "dashed",
-                      }}
-                    >
-                      {s ? (
-                        <>
-                          <div className="text-xs" style={{ fontWeight: 600, color }}>{subjectName(s.assignment.subjectId)}</div>
-                          <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{className(s.assignment.classId)}</div>
-                        </>
-                      ) : (
-                        <span className="text-xs" style={{ color: PALETTE.inkMuted }}>—</span>
-                      )}
-                    </div>
-                  );
-                })}
-              </Fragment>
-            ))}
+            {DAYS.map((d) => <div key={d} className="text-sm text-center py-2" style={{ fontWeight: 600, color: PALETTE.inkMuted }}>{d}</div>)}
+            {Array.from({ length: MAX_PERIODS }, (_, r) => r).map((r) => {
+              const refPeriod = REFERENCE_PERIODS[r];
+              return (
+                <Fragment key={r}>
+                  <div className="text-xs py-3 pr-2 text-right" style={{ color: PALETTE.inkMuted }}>{refPeriod ? `${refPeriod.start}–${refPeriod.end}` : ""}</div>
+                  {DAYS.map((_, dayIdx) => {
+                    const periods = periodsForDay(dayIdx);
+                    const period = periods[r];
+                    if (!period) return <div key={dayIdx} className="m-1 rounded-lg" style={{ minHeight: 56 }} />;
+                    const primary = findPrimary(dayIdx, r);
+                    const co = findCo(dayIdx, r);
+                    const color = primary ? classColor(primary.assignment.classId) : null;
+                    return (
+                      <div key={dayIdx} className="m-1 rounded-lg px-2 py-2"
+                        style={{ minHeight: 56, background: primary ? `${color}1A` : "#FCFAF6", border: `1px solid ${primary ? color : PALETTE.border}`, borderStyle: primary ? "solid" : "dashed" }}>
+                        {primary ? (
+                          <>
+                            <div className="text-xs" style={{ fontWeight: 600, color }}>{subjectName(primary.assignment.subjectId)}</div>
+                            <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{className(primary.assignment.classId)}</div>
+                          </>
+                        ) : co.length === 0 ? (
+                          <span className="text-xs" style={{ color: PALETTE.inkMuted }}>—</span>
+                        ) : null}
+                        {co.map((cs) => (
+                          <div key={cs.id} className="text-xs mt-1" style={{ color: PALETTE.honey, fontWeight: 600 }}>
+                            compresenza: {subjectName(cs.assignment.subjectId)} · {className(cs.assignment.classId)} ({cs.coDurationMinutes}min)
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </Fragment>
+              );
+            })}
           </div>
         </Card>
       </div>

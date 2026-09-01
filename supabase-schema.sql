@@ -31,7 +31,10 @@ create table assignments (
 create table slots (
   id uuid primary key default gen_random_uuid(),
   day integer not null,
-  hour integer not null,
+  period_index integer not null,
+  is_co boolean not null default false,
+  co_offset_minutes integer,
+  co_duration_minutes integer,
   assignment_id uuid not null references assignments(id) on delete cascade
 );
 
