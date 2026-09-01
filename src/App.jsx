@@ -1,5 +1,6 @@
-import { useState, Fragment } from "react";
-import { Plus, X, Trash2, AlertTriangle, Eye, LayoutGrid, Users } from "lucide-react";
+import { useState, useEffect, Fragment } from "react";
+import { Plus, X, Trash2, AlertTriangle, Eye, LayoutGrid, Users, LogOut, Lock } from "lucide-react";
+import { supabase, supabaseConfigured } from "./supabaseClient";
 
 const DAYS = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì"];
 const HOURS = Array.from({ length: 8 }, (_, i) => ({
@@ -21,74 +22,26 @@ const PALETTE = {
   dangerSoft: "#F6E4DF",
 };
 
-const initialTeachers = [
-  { id: "t1", name: "Emanuela", totalHours: 22 },
-  { id: "t2", name: "Sara", totalHours: 22 },
-  { id: "t3", name: "Martina", totalHours: 24 },
-  { id: "t4", name: "Lia", totalHours: 18 },
-  { id: "t5", name: "Goretta", totalHours: 12 },
-  { id: "t6", name: "Chiara", totalHours: 22 },
-  { id: "t7", name: "Rossella", totalHours: 20 },
-];
-
-const initialSubjects = [
-  { id: "sub1", name: "Italiano" },
-  { id: "sub2", name: "Storia" },
-  { id: "sub3", name: "Matematica" },
-  { id: "sub4", name: "Scienze" },
-  { id: "sub5", name: "Musica" },
-  { id: "sub6", name: "Arte" },
-  { id: "sub7", name: "Educazione fisica" },
-];
-
-const initialClasses = [
-  { id: "c1", name: "Prima", color: "#D9973F" },
-  { id: "c2", name: "Seconda", color: "#3E6B5F" },
-  { id: "c3", name: "Terza", color: "#3B6EA5" },
-  { id: "c4", name: "Quarta", color: "#8B5FA8" },
-  { id: "c5", name: "Quinta", color: "#B5482F" },
-];
-
-const initialAssignments = [
-  { id: "a1", teacherId: "t1", subjectId: "sub1", classId: "c1", hours: 8 },
-  { id: "a2", teacherId: "t2", subjectId: "sub3", classId: "c1", hours: 6 },
-  { id: "a3", teacherId: "t3", subjectId: "sub7", classId: "c1", hours: 2 },
-  { id: "a4", teacherId: "t1", subjectId: "sub1", classId: "c2", hours: 8 },
-  { id: "a5", teacherId: "t4", subjectId: "sub3", classId: "c2", hours: 6 },
-  { id: "a6", teacherId: "t5", subjectId: "sub5", classId: "c2", hours: 1 },
-  { id: "a7", teacherId: "t6", subjectId: "sub1", classId: "c3", hours: 7 },
-  { id: "a8", teacherId: "t7", subjectId: "sub3", classId: "c3", hours: 6 },
-  { id: "a9", teacherId: "t3", subjectId: "sub4", classId: "c3", hours: 2 },
-  { id: "a10", teacherId: "t2", subjectId: "sub1", classId: "c4", hours: 6 },
-  { id: "a11", teacherId: "t4", subjectId: "sub2", classId: "c4", hours: 2 },
-  { id: "a12", teacherId: "t5", subjectId: "sub6", classId: "c4", hours: 1 },
-  { id: "a13", teacherId: "t6", subjectId: "sub3", classId: "c5", hours: 6 },
-  { id: "a14", teacherId: "t7", subjectId: "sub4", classId: "c5", hours: 2 },
-  { id: "a15", teacherId: "t1", subjectId: "sub7", classId: "c5", hours: 2 },
-];
-
-const initialSlots = [
-  { id: "sl1", day: 0, hour: 0, assignmentId: "a1" },
-  { id: "sl2", day: 0, hour: 1, assignmentId: "a1" },
-  { id: "sl3", day: 1, hour: 0, assignmentId: "a4" },
-  { id: "sl4", day: 0, hour: 2, assignmentId: "a7" },
-  { id: "sl5", day: 2, hour: 0, assignmentId: "a10" },
-  { id: "sl6", day: 1, hour: 1, assignmentId: "a13" },
-];
-
-let idCounter = 100;
-const nextId = (prefix) => `${prefix}${idCounter++}`;
+const classColors = ["#D9973F", "#3E6B5F", "#3B6EA5", "#8B5FA8", "#B5482F", "#4C8577"];
 
 export default function App() {
-  const [tab, setTab] = useState("config");
-  const [teachers, setTeachers] = useState(initialTeachers);
-  const [subjects, setSubjects] = useState(initialSubjects);
-  const [classes, setClasses] = useState(initialClasses);
-  const [assignments, setAssignments] = useState(initialAssignments);
-  const [slots, setSlots] = useState(initialSlots);
+  if (!supabaseConfigured) {
+    return <SetupNeeded />;
+  }
 
-  const [selectedClassId, setSelectedClassId] = useState(classes[0].id);
-  const [selectedTeacherId, setSelectedTeacherId] = useState(teachers[0].id);
+  const [tab, setTab] = useState("insegnante");
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(true);
+
+  const [teachers, setTeachers] = useState([]);
+  const [subjects, setSubjects] = useState([]);
+  const [classes, setClasses] = useState([]);
+  const [assignments, setAssignments] = useState([]);
+  const [slots, setSlots] = useState([]);
+
+  const [selectedClassId, setSelectedClassId] = useState(null);
+  const [selectedTeacherId, setSelectedTeacherId] = useState(null);
   const [modal, setModal] = useState(null); // { day, hour, mode: 'assign'|'remove', slotId? }
 
   const [newTeacherName, setNewTeacherName] = useState("");
@@ -96,6 +49,55 @@ export default function App() {
   const [newSubjectName, setNewSubjectName] = useState("");
   const [newClassName, setNewClassName] = useState("");
   const [newAssign, setNewAssign] = useState({ teacherId: "", subjectId: "", classId: "", hours: "" });
+
+  // ---- auth ----
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  // ---- data fetching ----
+  const fetchAll = async () => {
+    const [teachersRes, subjectsRes, classesRes, assignmentsRes, slotsRes] = await Promise.all([
+      supabase.from("teachers").select("*").order("name"),
+      supabase.from("subjects").select("*").order("name"),
+      supabase.from("classes").select("*").order("name"),
+      supabase.from("assignments").select("*"),
+      supabase.from("slots").select("*"),
+    ]);
+    setTeachers((teachersRes.data || []).map((t) => ({ id: t.id, name: t.name, totalHours: t.total_hours })));
+    setSubjects((subjectsRes.data || []).map((s) => ({ id: s.id, name: s.name })));
+    setClasses((classesRes.data || []).map((c) => ({ id: c.id, name: c.name, color: c.color })));
+    setAssignments(
+      (assignmentsRes.data || []).map((a) => ({
+        id: a.id,
+        teacherId: a.teacher_id,
+        subjectId: a.subject_id,
+        classId: a.class_id,
+        hours: a.hours,
+      }))
+    );
+    setSlots((slotsRes.data || []).map((s) => ({ id: s.id, day: s.day, hour: s.hour, assignmentId: s.assignment_id })));
+    setDataLoading(false);
+  };
+
+  useEffect(() => {
+    fetchAll();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedClassId && classes.length > 0) setSelectedClassId(classes[0].id);
+  }, [classes, selectedClassId]);
+
+  useEffect(() => {
+    if (!selectedTeacherId && teachers.length > 0) setSelectedTeacherId(teachers[0].id);
+  }, [teachers, selectedTeacherId]);
 
   const teacherName = (id) => teachers.find((t) => t.id === id)?.name || "—";
   const subjectName = (id) => subjects.find((s) => s.id === id)?.name || "—";
@@ -129,58 +131,68 @@ export default function App() {
         teacherOfAssignment(s.assignmentId) === teacherId
     );
 
-  // ---- actions ----
-  const addTeacher = () => {
+  // ---- actions (write to Supabase, then refresh) ----
+  const addTeacher = async () => {
     if (!newTeacherName.trim()) return;
-    setTeachers([...teachers, { id: nextId("t"), name: newTeacherName.trim(), totalHours: Number(newTeacherHours) || 0 }]);
+    const { error } = await supabase
+      .from("teachers")
+      .insert({ name: newTeacherName.trim(), total_hours: Number(newTeacherHours) || 0 });
+    if (error) return alert("Errore: " + error.message);
     setNewTeacherName("");
     setNewTeacherHours("");
+    await fetchAll();
   };
-  const updateTeacherHours = (id, value) => {
-    setTeachers(teachers.map((t) => (t.id === id ? { ...t, totalHours: Number(value) || 0 } : t)));
+  const updateTeacherHours = async (id, value) => {
+    const { error } = await supabase.from("teachers").update({ total_hours: Number(value) || 0 }).eq("id", id);
+    if (error) return alert("Errore: " + error.message);
+    await fetchAll();
   };
-  const addSubject = () => {
+  const addSubject = async () => {
     if (!newSubjectName.trim()) return;
-    setSubjects([...subjects, { id: nextId("sub"), name: newSubjectName.trim() }]);
+    const { error } = await supabase.from("subjects").insert({ name: newSubjectName.trim() });
+    if (error) return alert("Errore: " + error.message);
     setNewSubjectName("");
+    await fetchAll();
   };
-  const classColors = ["#D9973F", "#3E6B5F", "#3B6EA5", "#8B5FA8", "#B5482F", "#4C8577"];
-  const addClass = () => {
+  const addClass = async () => {
     if (!newClassName.trim()) return;
-    setClasses([...classes, { id: nextId("c"), name: newClassName.trim(), color: classColors[classes.length % classColors.length] }]);
+    const color = classColors[classes.length % classColors.length];
+    const { error } = await supabase.from("classes").insert({ name: newClassName.trim(), color });
+    if (error) return alert("Errore: " + error.message);
     setNewClassName("");
+    await fetchAll();
   };
-  const addAssignment = () => {
+  const addAssignment = async () => {
     const { teacherId, subjectId, classId, hours } = newAssign;
     if (!teacherId || !subjectId || !classId || !hours || Number(hours) <= 0) return;
-    setAssignments([...assignments, { id: nextId("a"), teacherId, subjectId, classId, hours: Number(hours) }]);
+    const { error } = await supabase
+      .from("assignments")
+      .insert({ teacher_id: teacherId, subject_id: subjectId, class_id: classId, hours: Number(hours) });
+    if (error) return alert("Errore: " + error.message);
     setNewAssign({ teacherId: "", subjectId: "", classId: "", hours: "" });
+    await fetchAll();
   };
 
-  const removeTeacher = (id) => {
-    const affected = assignments.filter((a) => a.teacherId === id).map((a) => a.id);
-    setSlots(slots.filter((s) => !affected.includes(s.assignmentId)));
-    setAssignments(assignments.filter((a) => a.teacherId !== id));
-    setTeachers(teachers.filter((t) => t.id !== id));
+  const removeTeacher = async (id) => {
+    const { error } = await supabase.from("teachers").delete().eq("id", id);
+    if (error) return alert("Errore: " + error.message);
+    await fetchAll();
   };
-  const removeSubject = (id) => {
-    const affected = assignments.filter((a) => a.subjectId === id).map((a) => a.id);
-    setSlots(slots.filter((s) => !affected.includes(s.assignmentId)));
-    setAssignments(assignments.filter((a) => a.subjectId !== id));
-    setSubjects(subjects.filter((s) => s.id !== id));
+  const removeSubject = async (id) => {
+    const { error } = await supabase.from("subjects").delete().eq("id", id);
+    if (error) return alert("Errore: " + error.message);
+    await fetchAll();
   };
-  const removeClass = (id) => {
-    const affected = assignments.filter((a) => a.classId === id).map((a) => a.id);
-    setSlots(slots.filter((s) => !affected.includes(s.assignmentId)));
-    setAssignments(assignments.filter((a) => a.classId !== id));
-    setClasses(classes.filter((c) => c.id !== id));
-    if (selectedClassId === id && classes.length > 1) {
-      setSelectedClassId(classes.find((c) => c.id !== id).id);
-    }
+  const removeClass = async (id) => {
+    const { error } = await supabase.from("classes").delete().eq("id", id);
+    if (error) return alert("Errore: " + error.message);
+    if (selectedClassId === id) setSelectedClassId(null);
+    await fetchAll();
   };
-  const removeAssignment = (id) => {
-    setSlots(slots.filter((s) => s.assignmentId !== id));
-    setAssignments(assignments.filter((a) => a.id !== id));
+  const removeAssignment = async (id) => {
+    const { error } = await supabase.from("assignments").delete().eq("id", id);
+    if (error) return alert("Errore: " + error.message);
+    await fetchAll();
   };
 
   const openCell = (day, hour) => {
@@ -188,13 +200,19 @@ export default function App() {
     if (existing) setModal({ mode: "remove", day, hour, slotId: existing.id });
     else setModal({ mode: "assign", day, hour });
   };
-  const assignTo = (assignmentId) => {
-    setSlots([...slots, { id: nextId("sl"), day: modal.day, hour: modal.hour, assignmentId }]);
+  const assignTo = async (assignmentId) => {
+    const { error } = await supabase
+      .from("slots")
+      .insert({ day: modal.day, hour: modal.hour, assignment_id: assignmentId });
+    if (error) return alert("Errore: " + error.message);
     setModal(null);
+    await fetchAll();
   };
-  const unassign = () => {
-    setSlots(slots.filter((s) => s.id !== modal.slotId));
+  const unassign = async () => {
+    const { error } = await supabase.from("slots").delete().eq("id", modal.slotId);
+    if (error) return alert("Errore: " + error.message);
     setModal(null);
+    await fetchAll();
   };
 
   const classAssignments = assignments.filter((a) => a.classId === selectedClassId);
@@ -216,13 +234,13 @@ export default function App() {
 
       <div className="max-w-6xl mx-auto px-6 py-8">
         {/* Header */}
-        <div className="flex items-baseline justify-between mb-6 flex-wrap gap-3">
+        <div className="flex items-baseline justify-between mb-3 flex-wrap gap-3">
           <div>
             <h1 className="heading text-3xl" style={{ color: PALETTE.ink, fontWeight: 600 }}>
               Orario settimanale
             </h1>
             <p style={{ color: PALETTE.inkMuted }} className="mt-1 text-sm">
-              Costruzione turni per la scuola dell'infanzia · prototipo dimostrativo
+              Scuola primaria · gestione orari insegnanti
             </p>
           </div>
           <nav className="flex gap-1 rounded-full p-1" style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}` }}>
@@ -238,72 +256,101 @@ export default function App() {
           </nav>
         </div>
 
-        {tab === "config" && (
-          <ConfigTab
-            teachers={teachers}
-            subjects={subjects}
-            classes={classes}
-            assignments={assignments}
-            newTeacherName={newTeacherName}
-            setNewTeacherName={setNewTeacherName}
-            newTeacherHours={newTeacherHours}
-            setNewTeacherHours={setNewTeacherHours}
-            addTeacher={addTeacher}
-            removeTeacher={removeTeacher}
-            updateTeacherHours={updateTeacherHours}
-            teacherAssignedHours={teacherAssignedHours}
-            teacherRemainingBudget={teacherRemainingBudget}
-            newSubjectName={newSubjectName}
-            setNewSubjectName={setNewSubjectName}
-            addSubject={addSubject}
-            removeSubject={removeSubject}
-            newClassName={newClassName}
-            setNewClassName={setNewClassName}
-            addClass={addClass}
-            removeClass={removeClass}
-            newAssign={newAssign}
-            setNewAssign={setNewAssign}
-            addAssignment={addAssignment}
-            removeAssignment={removeAssignment}
-            teacherName={teacherName}
-            subjectName={subjectName}
-            className={className}
-            remainingHours={remainingHours}
-            usedHours={usedHours}
-          />
-        )}
+        <div className="mb-6 text-xs flex items-center gap-2" style={{ color: PALETTE.inkMuted }}>
+          {session ? (
+            <>
+              <span>Accesso direzione: {session.user.email}</span>
+              <button
+                onClick={() => supabase.auth.signOut()}
+                className="flex items-center gap-1 underline"
+                style={{ color: PALETTE.inkMuted }}
+              >
+                <LogOut size={12} /> Esci
+              </button>
+            </>
+          ) : (
+            <span>Consultazione pubblica — l'accesso della direzione serve solo per modificare i dati.</span>
+          )}
+        </div>
 
-        {tab === "orario" && (
-          <OrarioTab
-            classes={classes}
-            selectedClassId={selectedClassId}
-            setSelectedClassId={setSelectedClassId}
-            classAssignments={classAssignments}
-            teacherName={teacherName}
-            subjectName={subjectName}
-            remainingHours={remainingHours}
-            usedHours={usedHours}
-            slotAt={slotAt}
-            openCell={openCell}
-            classColor={classColor}
-            assignmentById={assignmentById}
-          />
-        )}
+        {dataLoading ? (
+          <p className="text-sm" style={{ color: PALETTE.inkMuted }}>Caricamento dati…</p>
+        ) : (
+          <>
+            {tab === "config" &&
+              (session ? (
+                <ConfigTab
+                  teachers={teachers}
+                  subjects={subjects}
+                  classes={classes}
+                  assignments={assignments}
+                  newTeacherName={newTeacherName}
+                  setNewTeacherName={setNewTeacherName}
+                  newTeacherHours={newTeacherHours}
+                  setNewTeacherHours={setNewTeacherHours}
+                  addTeacher={addTeacher}
+                  removeTeacher={removeTeacher}
+                  updateTeacherHours={updateTeacherHours}
+                  teacherAssignedHours={teacherAssignedHours}
+                  teacherRemainingBudget={teacherRemainingBudget}
+                  newSubjectName={newSubjectName}
+                  setNewSubjectName={setNewSubjectName}
+                  addSubject={addSubject}
+                  removeSubject={removeSubject}
+                  newClassName={newClassName}
+                  setNewClassName={setNewClassName}
+                  addClass={addClass}
+                  removeClass={removeClass}
+                  newAssign={newAssign}
+                  setNewAssign={setNewAssign}
+                  addAssignment={addAssignment}
+                  removeAssignment={removeAssignment}
+                  teacherName={teacherName}
+                  subjectName={subjectName}
+                  className={className}
+                  remainingHours={remainingHours}
+                  usedHours={usedHours}
+                />
+              ) : (
+                <LoginGate authLoading={authLoading} />
+              ))}
 
-        {tab === "insegnante" && (
-          <InsegnanteTab
-            teachers={teachers}
-            selectedTeacherId={selectedTeacherId}
-            setSelectedTeacherId={setSelectedTeacherId}
-            teacherSlots={teacherSlots}
-            subjectName={subjectName}
-            className={className}
-            classColor={classColor}
-          />
+            {tab === "orario" &&
+              (session ? (
+                <OrarioTab
+                  classes={classes}
+                  selectedClassId={selectedClassId}
+                  setSelectedClassId={setSelectedClassId}
+                  classAssignments={classAssignments}
+                  teacherName={teacherName}
+                  subjectName={subjectName}
+                  remainingHours={remainingHours}
+                  usedHours={usedHours}
+                  slotAt={slotAt}
+                  openCell={openCell}
+                  classColor={classColor}
+                  assignmentById={assignmentById}
+                />
+              ) : (
+                <LoginGate authLoading={authLoading} />
+              ))}
+
+            {tab === "insegnante" && (
+              <InsegnanteTab
+                teachers={teachers}
+                selectedTeacherId={selectedTeacherId}
+                setSelectedTeacherId={setSelectedTeacherId}
+                teacherSlots={teacherSlots}
+                subjectName={subjectName}
+                className={className}
+                classColor={classColor}
+              />
+            )}
+          </>
         )}
       </div>
 
-      {modal && (
+      {modal && session && (
         <CellModal
           modal={modal}
           onClose={() => setModal(null)}
@@ -320,6 +367,67 @@ export default function App() {
         />
       )}
     </div>
+  );
+}
+
+function SetupNeeded() {
+  return (
+    <div style={{ fontFamily: "'Inter', sans-serif", background: "#FAF7F1", minHeight: "100vh" }} className="flex items-center justify-center p-6">
+      <div className="max-w-md rounded-2xl p-6" style={{ background: "#fff", border: "1px solid #E7E0D3" }}>
+        <h1 className="text-lg mb-2" style={{ fontWeight: 600 }}>Configurazione mancante</h1>
+        <p className="text-sm" style={{ color: "#7A7266" }}>
+          Mancano le variabili d'ambiente <code>VITE_SUPABASE_URL</code> e <code>VITE_SUPABASE_ANON_KEY</code>.
+          Aggiungile in un file <code>.env.local</code> in locale, oppure nelle "Environment Variables" del progetto su Vercel, poi ricarica.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function LoginGate({ authLoading }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async () => {
+    setLoading(true);
+    setError("");
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    if (error) setError("Email o password non corretti.");
+  };
+
+  if (authLoading) return null;
+
+  return (
+    <Card style={{ maxWidth: 380 }}>
+      <div className="flex items-center gap-2 mb-3">
+        <Lock size={16} style={{ color: PALETTE.inkMuted }} />
+        <SectionTitle>Accesso direzione</SectionTitle>
+      </div>
+      <p className="text-sm mb-4" style={{ color: PALETTE.inkMuted }}>
+        Questa sezione è riservata a chi gestisce l'orario. Le insegnanti possono consultare il proprio orario da "Vista insegnante" senza accedere.
+      </p>
+      <div className="flex flex-col gap-2 mb-3">
+        <TextInput
+          type="email"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+        />
+        <TextInput
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+        />
+      </div>
+      {error && <p className="text-xs mb-3" style={{ color: PALETTE.danger }}>{error}</p>}
+      <SmallButton onClick={submit}>{loading ? "Accesso in corso…" : "Accedi"}</SmallButton>
+    </Card>
   );
 }
 
@@ -446,8 +554,11 @@ function ConfigTab(props) {
                   <input
                     type="number"
                     min="0"
-                    value={t.totalHours}
-                    onChange={(e) => updateTeacherHours(t.id, e.target.value)}
+                    defaultValue={t.totalHours}
+                    key={`${t.id}-${t.totalHours}`}
+                    onBlur={(e) => {
+                      if (Number(e.target.value) !== t.totalHours) updateTeacherHours(t.id, e.target.value);
+                    }}
                     className="w-16 rounded-md px-2 py-1 text-xs text-right outline-none"
                     style={{ border: `1px solid ${PALETTE.border}` }}
                   />
@@ -809,6 +920,16 @@ function ModalShell({ onClose, title, children }) {
 }
 
 function InsegnanteTab({ teachers, selectedTeacherId, setSelectedTeacherId, teacherSlots, subjectName, className, classColor }) {
+  if (teachers.length === 0) {
+    return (
+      <Card>
+        <p className="text-sm" style={{ color: PALETTE.inkMuted }}>
+          Nessuna insegnante ancora registrata. La direzione può aggiungerle da "Anagrafica".
+        </p>
+      </Card>
+    );
+  }
+
   const slots = teacherSlots(selectedTeacherId);
   const findSlot = (day, hour) => slots.find((s) => s.day === day && s.hour === hour);
 
@@ -818,7 +939,7 @@ function InsegnanteTab({ teachers, selectedTeacherId, setSelectedTeacherId, teac
         <Card>
           <SectionTitle>Insegnante</SectionTitle>
           <select
-            value={selectedTeacherId}
+            value={selectedTeacherId || ""}
             onChange={(e) => setSelectedTeacherId(e.target.value)}
             className="w-full rounded-lg px-3 py-2 text-sm"
             style={{ border: `1px solid ${PALETTE.border}` }}
