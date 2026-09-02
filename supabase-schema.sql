@@ -17,7 +17,8 @@ create table subjects (
 create table classes (
   id uuid primary key default gen_random_uuid(),
   name text not null,
-  color text not null default '#3E6B5F'
+  color text not null default '#3E6B5F',
+  position serial
 );
 
 create table assignments (

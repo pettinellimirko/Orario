@@ -1,5 +1,5 @@
 import { useState, useEffect, Fragment } from "react";
-import { Plus, X, Trash2, AlertTriangle, Eye, LayoutGrid, Users, LogOut, Lock, UserPlus } from "lucide-react";
+import { Plus, X, Trash2, AlertTriangle, Eye, LayoutGrid, Users, LogOut, Lock, UserPlus, ArrowUp, ArrowDown } from "lucide-react";
 import { supabase, supabaseConfigured } from "./supabaseClient";
 
 const DAYS = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì"];
@@ -100,13 +100,13 @@ export default function App() {
     const [teachersRes, subjectsRes, classesRes, assignmentsRes, slotsRes] = await Promise.all([
       supabase.from("teachers").select("*").order("name"),
       supabase.from("subjects").select("*").order("name"),
-      supabase.from("classes").select("*").order("name"),
+      supabase.from("classes").select("*").order("position"),
       supabase.from("assignments").select("*"),
       supabase.from("slots").select("*"),
     ]);
     setTeachers((teachersRes.data || []).map((t) => ({ id: t.id, name: t.name, totalHours: t.total_hours })));
     setSubjects((subjectsRes.data || []).map((s) => ({ id: s.id, name: s.name })));
-    setClasses((classesRes.data || []).map((c) => ({ id: c.id, name: c.name, color: c.color })));
+    setClasses((classesRes.data || []).map((c) => ({ id: c.id, name: c.name, color: c.color, position: c.position })));
     setAssignments(
       (assignmentsRes.data || []).map((a) => ({
         id: a.id,
@@ -249,6 +249,20 @@ export default function App() {
     await fetchAll();
   };
 
+  const moveClass = async (id, direction) => {
+    const idx = classes.findIndex((c) => c.id === id);
+    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (idx === -1 || swapIdx < 0 || swapIdx >= classes.length) return;
+    const a = classes[idx];
+    const b = classes[swapIdx];
+    const [{ error: e1 }, { error: e2 }] = await Promise.all([
+      supabase.from("classes").update({ position: b.position }).eq("id", a.id),
+      supabase.from("classes").update({ position: a.position }).eq("id", b.id),
+    ]);
+    if (e1 || e2) return alert("Errore: " + (e1?.message || e2?.message));
+    await fetchAll();
+  };
+
   const openCell = (day, periodIndex) => setModal({ day, periodIndex });
 
   const assignPrimary = async (assignmentId) => {
@@ -342,7 +356,7 @@ export default function App() {
                   addTeacher={addTeacher} removeTeacher={removeTeacher} updateTeacherHours={updateTeacherHours}
                   teacherAssignedHours={teacherAssignedHours} teacherRemainingBudget={teacherRemainingBudget}
                   newSubjectName={newSubjectName} setNewSubjectName={setNewSubjectName} addSubject={addSubject} removeSubject={removeSubject}
-                  newClassName={newClassName} setNewClassName={setNewClassName} addClass={addClass} removeClass={removeClass}
+                  newClassName={newClassName} setNewClassName={setNewClassName} addClass={addClass} removeClass={removeClass} moveClass={moveClass}
                   newAssign={newAssign} setNewAssign={setNewAssign} addAssignment={addAssignment} removeAssignment={removeAssignment}
                   teacherName={teacherName} subjectName={subjectName} className={className}
                   remainingMinutes={remainingMinutes} usedMinutes={usedMinutes}
@@ -495,7 +509,7 @@ function ConfigTab(props) {
     newTeacherName, setNewTeacherName, newTeacherHours, setNewTeacherHours, addTeacher, removeTeacher,
     updateTeacherHours, teacherAssignedHours, teacherRemainingBudget,
     newSubjectName, setNewSubjectName, addSubject, removeSubject,
-    newClassName, setNewClassName, addClass, removeClass,
+    newClassName, setNewClassName, addClass, removeClass, moveClass,
     newAssign, setNewAssign, addAssignment, removeAssignment,
     teacherName, subjectName, className, remainingMinutes, usedMinutes,
   } = props;
@@ -556,13 +570,21 @@ function ConfigTab(props) {
           <TextInput placeholder="Es. Sezione Rossa" value={newClassName} onChange={(e) => setNewClassName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addClass()} />
           <SmallButton onClick={addClass}><Plus size={15} /></SmallButton>
         </div>
-        {classes.map((c) => (
+        {classes.map((c, idx) => (
           <div key={c.id} className="flex items-center justify-between py-2" style={{ borderBottom: `1px solid ${PALETTE.border}` }}>
-            <div className="flex items-center gap-2">
-              <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: c.color }} />
-              <span className="text-sm" style={{ fontWeight: 500 }}>{c.name}</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ background: c.color }} />
+              <span className="text-sm truncate" style={{ fontWeight: 500 }}>{c.name}</span>
             </div>
-            <button onClick={() => removeClass(c.id)} style={{ color: PALETTE.inkMuted }}><Trash2 size={15} /></button>
+            <div className="flex items-center gap-1 shrink-0">
+              <button onClick={() => moveClass(c.id, "up")} disabled={idx === 0} style={{ color: idx === 0 ? PALETTE.border : PALETTE.inkMuted, opacity: idx === 0 ? 0.5 : 1 }}>
+                <ArrowUp size={15} />
+              </button>
+              <button onClick={() => moveClass(c.id, "down")} disabled={idx === classes.length - 1} style={{ color: idx === classes.length - 1 ? PALETTE.border : PALETTE.inkMuted, opacity: idx === classes.length - 1 ? 0.5 : 1 }}>
+                <ArrowDown size={15} />
+              </button>
+              <button onClick={() => removeClass(c.id)} style={{ color: PALETTE.inkMuted }}><Trash2 size={15} /></button>
+            </div>
           </div>
         ))}
       </Card>
