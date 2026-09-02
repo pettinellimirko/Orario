@@ -367,6 +367,9 @@ export default function App() {
               <InsegnanteTab
                 teachers={teachers} selectedTeacherId={selectedTeacherId} setSelectedTeacherId={setSelectedTeacherId}
                 teacherSlots={teacherSlots} subjectName={subjectName} className={className} classColor={classColor}
+                classes={classes} classAssignmentsFor={(classId) => assignments.filter((a) => a.classId === classId)}
+                remainingMinutes={remainingMinutes} primarySlotAt={primarySlotAt} coSlotsAt={coSlotsAt}
+                assignmentById={assignmentById} teacherName={teacherName}
               />
             )}
           </>
@@ -698,9 +701,15 @@ function PeriodRow({ rowIndex, selectedClassId, primarySlotAt, coSlotsAt, openCe
         const slot = primarySlotAt(dayIdx, rowIndex, selectedClassId);
         const a = slot ? assignmentById(slot.assignmentId) : null;
         const coSlots = coSlotsAt(dayIdx, rowIndex, selectedClassId);
+        const isLong = toMinutes(period.end) - toMinutes(period.start) > 60;
         return (
           <button key={dayIdx} onClick={() => openCell(dayIdx, rowIndex)} className="m-1 rounded-lg text-left px-2 py-2 transition-colors"
             style={{ minHeight: 56, background: slot ? PALETTE.primarySoft : "#FCFAF6", border: `1px solid ${slot ? PALETTE.primary : PALETTE.border}`, borderStyle: slot ? "solid" : "dashed" }}>
+            {isLong && (
+              <div className="text-xs mb-0.5" style={{ color: PALETTE.honey, fontWeight: 600 }}>
+                {period.start}–{period.end} · {toMinutes(period.end) - toMinutes(period.start)}min
+              </div>
+            )}
             {a ? (
               <>
                 <div className="text-xs" style={{ fontWeight: 600, color: PALETTE.primary }}>{teacherName(a.teacherId)}</div>
@@ -837,11 +846,41 @@ function ModalShell({ onClose, title, children }) {
   );
 }
 
-function InsegnanteTab({ teachers, selectedTeacherId, setSelectedTeacherId, teacherSlots, subjectName, className, classColor }) {
+function InsegnanteTab({ teachers, selectedTeacherId, setSelectedTeacherId, teacherSlots, subjectName, className, classColor, classes, classAssignmentsFor, remainingMinutes, primarySlotAt, coSlotsAt, assignmentById, teacherName }) {
+  const [mode, setMode] = useState("teacher"); // 'teacher' | 'all'
+  const [viewClassId, setViewClassId] = useState(classes[0]?.id || null);
+
+  useEffect(() => {
+    if (!viewClassId && classes.length > 0) setViewClassId(classes[0].id);
+  }, [classes, viewClassId]);
+
   if (teachers.length === 0) {
     return <Card><p className="text-sm" style={{ color: PALETTE.inkMuted }}>Nessuna insegnante ancora registrata.</p></Card>;
   }
 
+  return (
+    <div>
+      <div className="flex gap-1 mb-4 rounded-full p-1 w-fit" style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}` }}>
+        <button onClick={() => setMode("teacher")} className="px-4 py-2 rounded-full text-sm" style={{ background: mode === "teacher" ? PALETTE.primary : "transparent", color: mode === "teacher" ? "#fff" : PALETTE.inkMuted, fontWeight: 500 }}>
+          Per insegnante
+        </button>
+        <button onClick={() => setMode("all")} className="px-4 py-2 rounded-full text-sm" style={{ background: mode === "all" ? PALETTE.primary : "transparent", color: mode === "all" ? "#fff" : PALETTE.inkMuted, fontWeight: 500 }}>
+          Vista completa · tutte le classi
+        </button>
+      </div>
+
+      {mode === "teacher" ? (
+        <TeacherGrid teachers={teachers} selectedTeacherId={selectedTeacherId} setSelectedTeacherId={setSelectedTeacherId} teacherSlots={teacherSlots} subjectName={subjectName} className={className} classColor={classColor} />
+      ) : (
+        <FullScheduleView classes={classes} viewClassId={viewClassId} setViewClassId={setViewClassId} classAssignmentsFor={classAssignmentsFor}
+          remainingMinutes={remainingMinutes} primarySlotAt={primarySlotAt} coSlotsAt={coSlotsAt} assignmentById={assignmentById}
+          teacherName={teacherName} subjectName={subjectName} />
+      )}
+    </div>
+  );
+}
+
+function TeacherGrid({ teachers, selectedTeacherId, setSelectedTeacherId, teacherSlots, subjectName, className, classColor }) {
   const slots = teacherSlots(selectedTeacherId);
   const findPrimary = (day, periodIndex) => slots.find((s) => !s.isCo && s.day === day && s.periodIndex === periodIndex);
   const findCo = (day, periodIndex) => slots.filter((s) => s.isCo && s.day === day && s.periodIndex === periodIndex);
@@ -875,9 +914,11 @@ function InsegnanteTab({ teachers, selectedTeacherId, setSelectedTeacherId, teac
                     const primary = findPrimary(dayIdx, r);
                     const co = findCo(dayIdx, r);
                     const color = primary ? classColor(primary.assignment.classId) : null;
+                    const isLong = toMinutes(period.end) - toMinutes(period.start) > 60;
                     return (
                       <div key={dayIdx} className="m-1 rounded-lg px-2 py-2"
                         style={{ minHeight: 56, background: primary ? `${color}1A` : "#FCFAF6", border: `1px solid ${primary ? color : PALETTE.border}`, borderStyle: primary ? "solid" : "dashed" }}>
+                        {isLong && <div className="text-xs mb-0.5" style={{ color: PALETTE.honey, fontWeight: 600 }}>{period.start}–{period.end}</div>}
                         {primary ? (
                           <>
                             <div className="text-xs" style={{ fontWeight: 600, color }}>{subjectName(primary.assignment.subjectId)}</div>
@@ -898,6 +939,98 @@ function InsegnanteTab({ teachers, selectedTeacherId, setSelectedTeacherId, teac
               );
             })}
           </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function FullScheduleView({ classes, viewClassId, setViewClassId, classAssignmentsFor, remainingMinutes, primarySlotAt, coSlotsAt, assignmentById, teacherName, subjectName }) {
+  if (classes.length === 0) {
+    return <Card><p className="text-sm" style={{ color: PALETTE.inkMuted }}>Nessuna classe ancora registrata.</p></Card>;
+  }
+  const classAssignments = classAssignmentsFor(viewClassId);
+  const incomplete = classAssignments.filter((a) => remainingMinutes(a) > 0);
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
+      <div className="lg:col-span-3">
+        <div className="flex gap-2 mb-4 flex-wrap">
+          {classes.map((c) => (
+            <button key={c.id} onClick={() => setViewClassId(c.id)} className="px-4 py-2 rounded-full text-sm flex items-center gap-2"
+              style={{ background: viewClassId === c.id ? c.color : PALETTE.surface, color: viewClassId === c.id ? "#fff" : PALETTE.ink, border: `1px solid ${viewClassId === c.id ? c.color : PALETTE.border}`, fontWeight: 500 }}>
+              {c.name}
+            </button>
+          ))}
+        </div>
+        <Card style={{ overflowX: "auto" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "110px repeat(5, minmax(120px, 1fr))", minWidth: 760 }}>
+            <div />
+            {DAYS.map((d) => <div key={d} className="text-sm text-center py-2" style={{ fontWeight: 600, color: PALETTE.inkMuted }}>{d}</div>)}
+            {Array.from({ length: MAX_PERIODS }, (_, r) => r).map((r) => {
+              const refPeriod = REFERENCE_PERIODS[r];
+              return (
+                <Fragment key={r}>
+                  <div className="text-xs py-3 pr-2 text-right" style={{ color: PALETTE.inkMuted }}>{refPeriod ? `${refPeriod.start}–${refPeriod.end}` : ""}</div>
+                  {DAYS.map((_, dayIdx) => {
+                    const periods = periodsForDay(dayIdx);
+                    const period = periods[r];
+                    if (!period) return <div key={dayIdx} className="m-1 rounded-lg" style={{ minHeight: 56 }} />;
+                    const slot = primarySlotAt(dayIdx, r, viewClassId);
+                    const a = slot ? assignmentById(slot.assignmentId) : null;
+                    const co = coSlotsAt(dayIdx, r, viewClassId);
+                    const isLong = toMinutes(period.end) - toMinutes(period.start) > 60;
+                    return (
+                      <div key={dayIdx} className="m-1 rounded-lg px-2 py-2"
+                        style={{ minHeight: 56, background: a ? PALETTE.primarySoft : PALETTE.dangerSoft, border: `1px solid ${a ? PALETTE.primary : PALETTE.danger}`, borderStyle: a ? "solid" : "dashed" }}>
+                        {isLong && <div className="text-xs mb-0.5" style={{ color: PALETTE.honey, fontWeight: 600 }}>{period.start}–{period.end}</div>}
+                        {a ? (
+                          <>
+                            <div className="text-xs" style={{ fontWeight: 600, color: PALETTE.primary }}>{teacherName(a.teacherId)}</div>
+                            <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{subjectName(a.subjectId)}</div>
+                            {co.map((cs) => {
+                              const ca = assignmentById(cs.assignmentId);
+                              return (
+                                <div key={cs.id} className="text-xs mt-1" style={{ color: PALETTE.honey, fontWeight: 600 }}>
+                                  + {teacherName(ca?.teacherId)} ({cs.coDurationMinutes}min)
+                                </div>
+                              );
+                            })}
+                          </>
+                        ) : (
+                          <span className="text-xs" style={{ color: PALETTE.danger, fontWeight: 600 }}>vuoto</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </Fragment>
+              );
+            })}
+          </div>
+        </Card>
+      </div>
+
+      <div>
+        <Card>
+          <SectionTitle>Ore non ancora assegnate</SectionTitle>
+          <p className="text-xs mb-3" style={{ color: PALETTE.inkMuted }}>
+            Celle rosse in griglia = periodo senza insegnante assegnata. Qui sotto, quali assegnazioni hanno ancora ore da collocare.
+          </p>
+          {incomplete.length === 0 ? (
+            <p className="text-sm" style={{ color: PALETTE.primary, fontWeight: 600 }}>Tutte le ore di questa classe sono state assegnate.</p>
+          ) : (
+            incomplete.map((a) => (
+              <div key={a.id} className="flex items-center justify-between py-2" style={{ borderBottom: `1px solid ${PALETTE.border}` }}>
+                <div className="text-sm min-w-0">
+                  <div style={{ fontWeight: 500 }} className="truncate">{teacherName(a.teacherId)}</div>
+                  <div className="text-xs" style={{ color: PALETTE.inkMuted }}>{subjectName(a.subjectId)}</div>
+                </div>
+                <span className="text-xs px-2 py-1 rounded-full shrink-0 ml-2" style={{ background: PALETTE.honeySoft, color: PALETTE.honey, fontWeight: 600 }}>
+                  {formatDuration(remainingMinutes(a))}
+                </span>
+              </div>
+            ))
+          )}
         </Card>
       </div>
     </div>
